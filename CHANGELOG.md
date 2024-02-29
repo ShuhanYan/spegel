@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - [#717](https://github.com/spegel-org/spegel/pull/717) Extend tests for distribution.
 
+- [#373](https://github.com/spegel-org/spegel/pull/373) Implement support to disable registry filtering in Containerd.
+
 ### Changed
 
 ### Deprecated
