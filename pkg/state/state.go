@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/spf13/afero"
+	"gopkg.in/yaml.v3"
 
 	"github.com/spegel-org/spegel/internal/channel"
 	"github.com/spegel-org/spegel/pkg/metrics"
@@ -32,6 +35,7 @@ func Track(ctx context.Context, ociClient oci.Client, router routing.Router, res
 			return nil
 		case <-tickerCh:
 			log.Info("running scheduled image state update")
+
 			if err := all(ctx, ociClient, router, resolveLatestTag); err != nil {
 				log.Error(err, "received errors when updating all images")
 				continue
@@ -52,6 +56,74 @@ func Track(ctx context.Context, ociClient oci.Client, router routing.Router, res
 			log.Error(err, "event channel error")
 		}
 	}
+}
+
+func TrackConfiguration(ctx context.Context, fs afero.Fs, configPath string, registryURLs, mirrorURLs []url.URL, resolveTags bool, registriesFilePath string) error {
+	log := logr.FromContextOrDiscard(ctx)
+
+	immediateCh := make(chan time.Time, 1)
+	immediateCh <- time.Now()
+	close(immediateCh)
+	expirationTicker := time.NewTicker(time.Minute)
+	defer expirationTicker.Stop()
+	tickerCh := channel.Merge(immediateCh, expirationTicker.C)
+	registryURLsMap := map[string]bool{}
+	for _, url := range registryURLs {
+		log.Info("add registry url to containerd configuration", "registry", url.String())
+		registryURLsMap[url.String()] = true
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-tickerCh:
+			log.Info("running scheduled configuration update")
+			if err := updateConfiguration(ctx, fs, configPath, registryURLsMap, mirrorURLs, resolveTags, registriesFilePath); err != nil {
+				log.Error(err, "received errors when updating configuration")
+				continue
+			}
+		}
+	}
+}
+
+func updateConfiguration(ctx context.Context, fs afero.Fs, configPath string, registryURLsMap map[string]bool, mirrorURLs []url.URL, resolveTags bool, registriesFilePath string) error {
+	log := logr.FromContextOrDiscard(ctx)
+	if registriesFilePath == "" {
+		return nil
+	}
+	b, err := afero.ReadFile(fs, registriesFilePath)
+	if errors.Is(err, afero.ErrFileNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	var urlsRaw []string
+	var urlsNeedUpdate []url.URL
+	err = yaml.Unmarshal(b, &urlsRaw)
+	if err != nil {
+		return err
+	}
+	for _, urlRaw := range urlsRaw {
+		if _, ok := registryURLsMap[urlRaw]; !ok {
+			log.Info("try to add registry url to containerd configuration", "registry", urlRaw)
+			registryURLsMap[urlRaw] = true
+			parsedURL, err := url.Parse(urlRaw)
+			if err != nil {
+				log.Info("could not parse registry url, skip", "url", urlRaw)
+				continue
+			}
+			urlsNeedUpdate = append(urlsNeedUpdate, *parsedURL)
+		}
+	}
+
+	err = oci.AddNewMirrorConfiguration(ctx, fs, configPath, urlsNeedUpdate, mirrorURLs, resolveTags)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func all(ctx context.Context, ociClient oci.Client, router routing.Router, resolveLatestTag bool) error {
