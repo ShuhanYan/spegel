@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/spf13/afero"
-	"gopkg.in/yaml.v3"
 
 	"github.com/spegel-org/spegel/internal/channel"
 	"github.com/spegel-org/spegel/pkg/metrics"
@@ -58,13 +58,13 @@ func Track(ctx context.Context, ociClient oci.Client, router routing.Router, res
 	}
 }
 
-func TrackConfiguration(ctx context.Context, fs afero.Fs, configPath string, registryURLs, mirrorURLs []url.URL, resolveTags bool, registriesFilePath string) error {
+func TrackConfiguration(ctx context.Context, fs afero.Fs, configPath string, registryURLs, mirrorURLs []url.URL, resolveTags bool, registriesFilePath string, refreshInterval time.Duration) error {
 	log := logr.FromContextOrDiscard(ctx)
 
 	immediateCh := make(chan time.Time, 1)
 	immediateCh <- time.Now()
 	close(immediateCh)
-	expirationTicker := time.NewTicker(time.Minute)
+	expirationTicker := time.NewTicker(refreshInterval)
 	defer expirationTicker.Stop()
 	tickerCh := channel.Merge(immediateCh, expirationTicker.C)
 	registryURLsMap := map[string]bool{}
@@ -77,6 +77,11 @@ func TrackConfiguration(ctx context.Context, fs afero.Fs, configPath string, reg
 		case <-ctx.Done():
 			return nil
 		case <-tickerCh:
+			if registriesFilePath == "" {
+				log.Info("registries file path not set, skip")
+				continue
+			}
+
 			log.Info("running scheduled configuration update")
 			if err := updateConfiguration(ctx, fs, configPath, registryURLsMap, mirrorURLs, resolveTags, registriesFilePath); err != nil {
 				log.Error(err, "received errors when updating configuration")
@@ -89,31 +94,41 @@ func TrackConfiguration(ctx context.Context, fs afero.Fs, configPath string, reg
 func updateConfiguration(ctx context.Context, fs afero.Fs, configPath string, registryURLsMap map[string]bool, mirrorURLs []url.URL, resolveTags bool, registriesFilePath string) error {
 	log := logr.FromContextOrDiscard(ctx)
 	if registriesFilePath == "" {
+		log.Info("registries file path not set, skip")
 		return nil
 	}
-	b, err := afero.ReadFile(fs, registriesFilePath)
+	files, err := afero.ReadDir(fs, registriesFilePath)
 	if errors.Is(err, afero.ErrFileNotFound) {
+		log.Info("registries file not found, skip", "path", registriesFilePath)
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 
-	var urlsRaw []string
 	var urlsNeedUpdate []url.URL
-	err = yaml.Unmarshal(b, &urlsRaw)
-	if err != nil {
-		return err
-	}
-	for _, urlRaw := range urlsRaw {
+
+	for _, file := range files {
+		// skip hidden files
+		if strings.HasPrefix(file.Name(), "..") {
+			continue
+		}
+		urlRaw := "https://" + file.Name()
+		parsedURL, err := url.Parse(urlRaw)
+		if err != nil {
+			log.Error(err, "failed to parse registry url", "url", urlRaw)
+			continue
+		}
+		err = oci.ValidateRegistry(*parsedURL)
+		if err != nil {
+			log.Error(err, "failed to validate registry url", "url", urlRaw)
+			continue
+		}
+
 		if _, ok := registryURLsMap[urlRaw]; !ok {
 			log.Info("try to add registry url to containerd configuration", "registry", urlRaw)
 			registryURLsMap[urlRaw] = true
-			parsedURL, err := url.Parse(urlRaw)
-			if err != nil {
-				log.Info("could not parse registry url, skip", "url", urlRaw)
-				continue
-			}
+
 			urlsNeedUpdate = append(urlsNeedUpdate, *parsedURL)
 		}
 	}
@@ -127,7 +142,7 @@ func updateConfiguration(ctx context.Context, fs afero.Fs, configPath string, re
 }
 
 func all(ctx context.Context, ociClient oci.Client, router routing.Router, resolveLatestTag bool) error {
-	log := logr.FromContextOrDiscard(ctx).V(4)
+	// log := logr.FromContextOrDiscard(ctx).V(4)
 	imgs, err := ociClient.ListImages(ctx)
 	if err != nil {
 		return err
@@ -145,7 +160,7 @@ func all(ctx context.Context, ociClient oci.Client, router routing.Router, resol
 		// Handle the list re-sync as update events; this will also prevent the
 		// update function from setting metrics values.
 		event := oci.ImageEvent{Image: img, Type: oci.UpdateEvent}
-		log.Info("sync image event", "image", event.Image.String(), "type", event.Type)
+		// log.Info("sync image event", "image", event.Image.String(), "type", event.Type)
 		keyTotal, err := update(ctx, ociClient, router, event, skipDigests, resolveLatestTag)
 		if err != nil {
 			errs = append(errs, err)
