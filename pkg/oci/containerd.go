@@ -55,8 +55,10 @@ func WithContentPath(path string) Option {
 	}
 }
 
-func NewContainerd(sock, namespace, registryConfigPath string, registries []url.URL, opts ...Option) (*Containerd, error) {
+func NewContainerd(ctx context.Context, sock, namespace, registryConfigPath string, registries []url.URL, opts ...Option) (*Containerd, error) {
+	log := logr.FromContextOrDiscard(ctx)
 	listFilter, eventFilter := createFilters(registries)
+	log.Info("created Containerd client", "socket", sock, "namespace", namespace, "listFilter", listFilter, "eventFilter", eventFilter)
 	c := &Containerd{
 		clientGetter: func() (*client.Client, error) {
 			return client.New(sock, client.WithDefaultNamespace(namespace))
@@ -403,6 +405,43 @@ func AddMirrorConfiguration(ctx context.Context, fs afero.Fs, configPath string,
 	return nil
 }
 
+// AddNewMirrorConfiguration adds new mirror configuration to the containerd registry configuration only if the config doesn't exist.
+func AddNewMirrorConfiguration(ctx context.Context, fs afero.Fs, configPath string, registryURLs, mirrorURLs []url.URL, resolveTags bool) error {
+	log := logr.FromContextOrDiscard(ctx)
+	err := validateRegistries(registryURLs)
+	if err != nil {
+		return err
+	}
+	// Write mirror configuration
+	capabilities := []string{"pull"}
+	if resolveTags {
+		capabilities = append(capabilities, "resolve")
+	}
+	for _, registryURL := range registryURLs {
+		fp := path.Join(configPath, registryURL.Host, "hosts.toml")
+		if doHostsExist(fs, fp) {
+			log.Info("Containerd mirror configuration already exists", "registry", registryURL.String(), "path", fp)
+			continue
+		}
+		log.Info("appending to existing Containerd mirror configuration", "registry", registryURL.String())
+
+		err := fs.MkdirAll(path.Dir(fp), 0o755)
+		if err != nil {
+			return err
+		}
+		templatedHosts, err := templateHosts(registryURL, mirrorURLs, capabilities)
+		if err != nil {
+			return err
+		}
+		err = afero.WriteFile(fs, fp, []byte(templatedHosts), 0o644)
+		if err != nil {
+			return err
+		}
+		log.Info("added New Containerd mirror configuration", "registry", registryURL.String(), "path", fp)
+	}
+	return nil
+}
+
 func validateRegistries(urls []url.URL) error {
 	errs := []error{}
 	for _, u := range urls {
@@ -503,6 +542,16 @@ capabilities = {{ $.Capabilities }}
 
 type hostFile struct {
 	Hosts map[string]interface{} `toml:"host"`
+}
+
+// return false if file does not exist
+func doHostsExist(fs afero.Fs, fp string) bool {
+	_, err := fs.Open(fp)
+	if errors.Is(err, afero.ErrFileNotFound) {
+		return false
+	} else {
+		return true
+	}
 }
 
 func existingHosts(fs afero.Fs, configPath string, registryURL url.URL) (string, error) {
