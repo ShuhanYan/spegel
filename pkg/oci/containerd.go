@@ -442,6 +442,26 @@ func AddNewMirrorConfiguration(ctx context.Context, fs afero.Fs, configPath stri
 	return nil
 }
 
+func ValidateRegistry(u url.URL) error {
+	errs := []error{}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		errs = append(errs, fmt.Errorf("invalid registry url scheme must be http or https: %s", u.String()))
+	}
+	if u.Path != "" {
+		errs = append(errs, fmt.Errorf("invalid registry url path has to be empty: %s", u.String()))
+	}
+	if len(u.Query()) != 0 {
+		errs = append(errs, fmt.Errorf("invalid registry url query has to be empty: %s", u.String()))
+	}
+	if u.User != nil {
+		errs = append(errs, fmt.Errorf("invalid registry url user has to be empty: %s", u.String()))
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	return errors.Join(errs...)
+}
+
 func validateRegistries(urls []url.URL) error {
 	errs := []error{}
 	for _, u := range urls {

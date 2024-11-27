@@ -30,12 +30,13 @@ import (
 )
 
 type ConfigurationCmd struct {
-	ContainerdRegistryConfigPath string    `arg:"--containerd-registry-config-path,env:CONTAINERD_REGISTRY_CONFIG_PATH" default:"/etc/containerd/certs.d" help:"Directory where mirror configuration is written."`
-	Registries                   []url.URL `arg:"--registries,required,env:REGISTRIES" help:"registries that are configured to be mirrored."`
-	MirrorRegistries             []url.URL `arg:"--mirror-registries,env:MIRROR_REGISTRIES,required" help:"registries that are configured to act as mirrors."`
-	ResolveTags                  bool      `arg:"--resolve-tags,env:RESOLVE_TAGS" default:"true" help:"When true Spegel will resolve tags to digests."`
-	AppendMirrors                bool      `arg:"--append-mirrors,env:APPEND_MIRRORS" default:"false" help:"When true existing mirror configuration will be appended to instead of replaced."`
-	RegistriesFilePath           string    `arg:"--registries-file-path,env:REGISTRIES_FILE_PATH" help:"Path to the registries file."`
+	ContainerdRegistryConfigPath string        `arg:"--containerd-registry-config-path,env:CONTAINERD_REGISTRY_CONFIG_PATH" default:"/etc/containerd/certs.d" help:"Directory where mirror configuration is written."`
+	Registries                   []url.URL     `arg:"--registries,required,env:REGISTRIES" help:"registries that are configured to be mirrored."`
+	MirrorRegistries             []url.URL     `arg:"--mirror-registries,env:MIRROR_REGISTRIES,required" help:"registries that are configured to act as mirrors."`
+	ResolveTags                  bool          `arg:"--resolve-tags,env:RESOLVE_TAGS" default:"true" help:"When true Spegel will resolve tags to digests."`
+	AppendMirrors                bool          `arg:"--append-mirrors,env:APPEND_MIRRORS" default:"false" help:"When true existing mirror configuration will be appended to instead of replaced."`
+	RegistriesFilePath           string        `arg:"--registries-file-path,env:REGISTRIES_FILE_PATH" help:"Path to the registries file."`
+	RefreshInterval              time.Duration `arg:"--refresh-interval,env:REFRESH_INTERVAL" default:"5m" help:"Interval to refresh the mirror configuration."`
 }
 
 type BootstrapConfig struct {
@@ -115,7 +116,7 @@ func configurationCommand(ctx context.Context, args *ConfigurationCmd) error {
 
 	// State tracking
 	g.Go(func() error {
-		err := state.TrackConfiguration(ctx, fs, args.ContainerdRegistryConfigPath, args.Registries, args.MirrorRegistries, args.ResolveTags, args.RegistriesFilePath)
+		err := state.TrackConfiguration(ctx, fs, args.ContainerdRegistryConfigPath, args.Registries, args.MirrorRegistries, args.ResolveTags, args.RegistriesFilePath, args.RefreshInterval)
 		if err != nil {
 			return err
 		}
