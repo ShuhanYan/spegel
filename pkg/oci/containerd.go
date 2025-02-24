@@ -55,8 +55,10 @@ func WithContentPath(path string) Option {
 	}
 }
 
-func NewContainerd(sock, namespace, registryConfigPath string, registries []url.URL, opts ...Option) (*Containerd, error) {
+func NewContainerd(ctx context.Context, sock, namespace, registryConfigPath string, registries []url.URL, opts ...Option) (*Containerd, error) {
+	log := logr.FromContextOrDiscard(ctx)
 	listFilter, eventFilter := createFilters(registries)
+	log.Info("created Containerd client", "socket", sock, "namespace", namespace, "listFilter", listFilter, "eventFilter", eventFilter)
 	c := &Containerd{
 		clientGetter: func() (*client.Client, error) {
 			return client.New(sock, client.WithDefaultNamespace(namespace))
@@ -332,12 +334,17 @@ func getEventImage(e typeurl.Any) (string, EventType, error) {
 	}
 }
 
-func createFilters(registries []url.URL) (string, string) {
+func createFilters(filterRegistries []url.URL) (string, string) {
 	registryHosts := []string{}
-	for _, registry := range registries {
+	for _, registry := range filterRegistries {
 		registryHosts = append(registryHosts, strings.ReplaceAll(registry.Host, `.`, `\\.`))
 	}
 	listFilter := fmt.Sprintf(`name~="^(%s)/"`, strings.Join(registryHosts, "|"))
+	if len(registryHosts) == 0 {
+		// Filter images that do not have a registry in it's reference,
+		// as we cant mirror images without registries.
+		listFilter = `name~="^.+/"`
+	}
 	eventFilter := fmt.Sprintf(`topic~="/images/create|/images/update|/images/delete",event.%s`, listFilter)
 	return listFilter, eventFilter
 }
@@ -396,6 +403,63 @@ func AddMirrorConfiguration(ctx context.Context, fs afero.Fs, configPath string,
 		log.Info("added Containerd mirror configuration", "registry", registryURL.String(), "path", fp)
 	}
 	return nil
+}
+
+// AddNewMirrorConfiguration adds new mirror configuration to the containerd registry configuration only if the config doesn't exist.
+func AddNewMirrorConfiguration(ctx context.Context, fs afero.Fs, configPath string, registryURLs, mirrorURLs []url.URL, resolveTags bool) error {
+	log := logr.FromContextOrDiscard(ctx)
+	err := validateRegistries(registryURLs)
+	if err != nil {
+		return err
+	}
+	// Write mirror configuration
+	capabilities := []string{"pull"}
+	if resolveTags {
+		capabilities = append(capabilities, "resolve")
+	}
+	for _, registryURL := range registryURLs {
+		fp := path.Join(configPath, registryURL.Host, "hosts.toml")
+		if doHostsExist(fs, fp) {
+			log.Info("Containerd mirror configuration already exists", "registry", registryURL.String(), "path", fp)
+			continue
+		}
+		log.Info("appending to existing Containerd mirror configuration", "registry", registryURL.String())
+
+		err := fs.MkdirAll(path.Dir(fp), 0o755)
+		if err != nil {
+			return err
+		}
+		templatedHosts, err := templateHosts(registryURL, mirrorURLs, capabilities)
+		if err != nil {
+			return err
+		}
+		err = afero.WriteFile(fs, fp, []byte(templatedHosts), 0o644)
+		if err != nil {
+			return err
+		}
+		log.Info("added New Containerd mirror configuration", "registry", registryURL.String(), "path", fp)
+	}
+	return nil
+}
+
+func ValidateRegistry(u url.URL) error {
+	errs := []error{}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		errs = append(errs, fmt.Errorf("invalid registry url scheme must be http or https: %s", u.String()))
+	}
+	if u.Path != "" {
+		errs = append(errs, fmt.Errorf("invalid registry url path has to be empty: %s", u.String()))
+	}
+	if len(u.Query()) != 0 {
+		errs = append(errs, fmt.Errorf("invalid registry url query has to be empty: %s", u.String()))
+	}
+	if u.User != nil {
+		errs = append(errs, fmt.Errorf("invalid registry url user has to be empty: %s", u.String()))
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	return errors.Join(errs...)
 }
 
 func validateRegistries(urls []url.URL) error {
@@ -498,6 +562,16 @@ capabilities = {{ $.Capabilities }}
 
 type hostFile struct {
 	Hosts map[string]interface{} `toml:"host"`
+}
+
+// return false if file does not exist
+func doHostsExist(fs afero.Fs, fp string) bool {
+	_, err := fs.Open(fp)
+	if errors.Is(err, afero.ErrFileNotFound) {
+		return false
+	} else {
+		return true
+	}
 }
 
 func existingHosts(fs afero.Fs, configPath string, registryURL url.URL) (string, error) {
