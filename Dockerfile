@@ -9,7 +9,7 @@ COPY internal/ internal/
 COPY pkg/ pkg/
 RUN CGO_ENABLED=0 go build -installsuffix 'static' -o spegel .
 
-FROM gcr.io/distroless/static:nonroot
+FROM mcr.microsoft.com/mirror/gcr/distroless/static:nonroot
 COPY --from=builder /build/spegel /app/
 WORKDIR /app
 USER root:root
