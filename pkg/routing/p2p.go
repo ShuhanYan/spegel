@@ -84,6 +84,21 @@ func NewP2PRouter(ctx context.Context, addr string, bs Bootstrapper, registryPor
 		return nil, fmt.Errorf("expected single host address but got %d %s", len(addrs), strings.Join(addrs, ", "))
 	}
 
+	hostAddr := host.Addrs()[0].String()
+	log := logr.FromContextOrDiscard(ctx).WithName("p2p")
+	log.Info("created host", "id", host.ID().String(), "address", hostAddr)
+	bootstrapPeerOpt := dht.BootstrapPeersFunc(func() []peer.AddrInfo {
+		addrInfo, err := bootstrapper.Get()
+		if err != nil {
+			log.Error(err, "could not get bootstrap addresses")
+			return nil
+		}
+		if addrInfo.ID == host.ID() {
+			log.Info("leader is self skipping connection to bootstrap node")
+			return nil
+		}
+		return []peer.AddrInfo{*addrInfo}
+	})
 	dhtOpts := []dht.Option{
 		dht.Mode(dht.ModeServer),
 		dht.ProtocolPrefix("/spegel"),
@@ -151,7 +166,7 @@ func (r *P2PRouter) Ready(ctx context.Context) (bool, error) {
 }
 
 func (r *P2PRouter) Resolve(ctx context.Context, key string, allowSelf bool, count int) (<-chan netip.AddrPort, error) {
-	log := logr.FromContextOrDiscard(ctx).WithValues("host", r.host.ID().String(), "key", key)
+	log := logr.FromContextOrDiscard(ctx).WithValues("host", r.host.ID().String(), "hostAddr", r.host.Addrs()[0].String(), "key", key)
 	c, err := createCid(key)
 	if err != nil {
 		return nil, err
@@ -203,7 +218,7 @@ func (r *P2PRouter) Resolve(ctx context.Context, key string, allowSelf bool, cou
 }
 
 func (r *P2PRouter) Advertise(ctx context.Context, keys []string) error {
-	logr.FromContextOrDiscard(ctx).V(4).Info("advertising keys", "host", r.host.ID().String(), "keys", keys)
+	// logr.FromContextOrDiscard(ctx).V(4).Info("advertising keys", "hostAddr", r.host.Addrs()[0].String(), "keys", keys)
 	for _, key := range keys {
 		c, err := createCid(key)
 		if err != nil {
