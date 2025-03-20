@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/google/uuid"
 
 	"github.com/spegel-org/spegel/internal/buffer"
 	"github.com/spegel-org/spegel/internal/mux"
@@ -23,7 +25,8 @@ import (
 )
 
 const (
-	MirroredHeaderKey = "X-Spegel-Mirrored"
+	MirroredHeaderKey      = "X-Spegel-Mirrored"
+	CorrelationIDHeaderKey = "Connection-ID"
 )
 
 type Registry struct {
@@ -97,12 +100,6 @@ func NewRegistry(ociClient oci.Client, router routing.Router, opts ...Option) *R
 	for _, opt := range opts {
 		opt(r)
 	}
-	if r.transport == nil {
-		//nolint: errcheck // Ignore
-		transport := http.DefaultTransport.(*http.Transport).Clone()
-		transport.MaxIdleConnsPerHost = 100
-		r.transport = transport
-	}
 	return r
 }
 
@@ -125,6 +122,7 @@ func (r *Registry) handle(rw mux.ResponseWriter, req *http.Request) {
 	if strings.HasPrefix(path, "/v2") {
 		path = "/v2/*"
 	}
+
 	defer func() {
 		latency := time.Since(start)
 		statusCode := strconv.FormatInt(int64(rw.Status()), 10)
@@ -143,8 +141,11 @@ func (r *Registry) handle(rw mux.ResponseWriter, req *http.Request) {
 			"status", rw.Status(),
 			"method", req.Method,
 			"latency", latency.String(),
-			"ip", getClientIP(req),
+			"ip", r.getClientIP(req),
 			"handler", handler,
+			"remoteAddr", r.getRemoteAddr(req),
+			"correlationID", req.Header.Get(CorrelationIDHeaderKey),
+			"requestHost", req.Host,
 		}
 		if rw.Status() >= 200 && rw.Status() < 300 {
 			r.log.Info("", kvs...)
@@ -201,6 +202,12 @@ func (r *Registry) registryHandler(rw mux.ResponseWriter, req *http.Request) str
 		return "registry"
 	}
 
+	if req.Header.Get(CorrelationIDHeaderKey) == "" {
+		cid := uuid.New().String()
+		r.log.Info("generated connection ID", "cid", cid)
+		req.Header.Set(CorrelationIDHeaderKey, cid)
+	}
+
 	// Request with mirror header are proxied.
 	if req.Header.Get(MirroredHeaderKey) != "true" {
 		// Set mirrored header in request to stop infinite loops
@@ -224,7 +231,7 @@ func (r *Registry) registryHandler(rw mux.ResponseWriter, req *http.Request) str
 }
 
 func (r *Registry) handleMirror(rw mux.ResponseWriter, req *http.Request, dist oci.DistributionPath) {
-	log := r.log.WithValues("ref", dist.Reference(), "path", req.URL.Path, "ip", getClientIP(req))
+	log := r.log.WithValues("ref", dist.Reference(), "path", req.URL.Path, "ip", getClientIP(req), "remoteAddr", r.getRemoteAddr(req), "correlationID", req.Header.Get(CorrelationIDHeaderKey), "requestHost", req.Host)
 
 	isExternal := r.isExternalRequest(req)
 	if isExternal {
@@ -291,6 +298,7 @@ func (r *Registry) handleMirror(rw mux.ResponseWriter, req *http.Request, dist o
 				Scheme: scheme,
 				Host:   ipAddr.String(),
 			}
+			log.V(4).Info("mirrored request start", "url", u.String(), "header", req.Header, "mirrorAttempts", mirrorAttempts)
 			proxy := httputil.NewSingleHostReverseProxy(u)
 			proxy.BufferPool = r.bufferPool
 			proxy.Transport = r.transport
@@ -306,9 +314,10 @@ func (r *Registry) handleMirror(rw mux.ResponseWriter, req *http.Request, dist o
 			}
 			proxy.ServeHTTP(rw, req)
 			if !succeeded {
+				log.V(4).Info("mirrored request failed", "url", u.String(), "header", req.Header, "mirrorAttempts", mirrorAttempts)
 				break
 			}
-			log.V(4).Info("mirrored request", "url", u.String())
+			log.V(4).Info("mirrored request completed", "url", u.String(), "header", req.Header, "mirrorAttempts", mirrorAttempts)
 			return
 		}
 	}
@@ -341,8 +350,15 @@ func (r *Registry) handleManifest(rw mux.ResponseWriter, req *http.Request, dist
 	}
 }
 
+<<<<<<< HEAD
 func (r *Registry) handleBlob(rw mux.ResponseWriter, req *http.Request, dist oci.DistributionPath) {
 	size, err := r.ociClient.Size(req.Context(), dist.Digest)
+=======
+func (r *Registry) handleBlob(rw mux.ResponseWriter, req *http.Request, ref reference) {
+	log := r.log.WithValues("path", req.URL.Path, "ip", r.getClientIP(req), "remoteAddr", r.getRemoteAddr(req), "correlationID", req.Header.Get(CorrelationIDHeaderKey), "requestHost", req.Host)
+	log.Info("handling blob request")
+	size, err := r.ociClient.Size(req.Context(), ref.dgst)
+>>>>>>> ec48e33 (fix)
 	if err != nil {
 		rw.WriteError(http.StatusInternalServerError, fmt.Errorf("could not determine size of blob with digest %s: %w", dist.Digest.String(), err))
 		return
@@ -354,33 +370,56 @@ func (r *Registry) handleBlob(rw mux.ResponseWriter, req *http.Request, dist oci
 	if req.Method == http.MethodHead {
 		return
 	}
+<<<<<<< HEAD
 
 	rc, err := r.ociClient.GetBlob(req.Context(), dist.Digest)
+=======
+	var w io.Writer = rw
+	rc, err := r.ociClient.GetBlob(req.Context(), ref.dgst)
+>>>>>>> ec48e33 (fix)
 	if err != nil {
 		rw.WriteError(http.StatusInternalServerError, fmt.Errorf("could not get reader for blob with digest %s: %w", dist.Digest.String(), err))
 		return
 	}
 	defer rc.Close()
-
-	http.ServeContent(rw, req, "", time.Time{}, rc)
+	_, err = io.Copy(w, rc)
+	if err != nil {
+		r.log.Error(err, "error occurred when copying blob")
+		return
+	}
 }
 
 func (r *Registry) isExternalRequest(req *http.Request) bool {
+	//r.log.V(4).Info("checking if request is external", "host", req.Host, "localAddr", r.localAddr, "correlationID", req.Header.Get(CorrelationIDHeaderKey))
 	return req.Host != r.localAddr
 }
 
-func getClientIP(req *http.Request) string {
+func (r *Registry) getClientIP(req *http.Request) string {
 	forwardedFor := req.Header.Get("X-Forwarded-For")
+	// r.log.V(4).Info("client IP", "forwardedFor", forwardedFor, "remoteAddr", req.RemoteAddr)
 	if forwardedFor != "" {
+		// r.log.V(4).Info("using X-Forwarded-For header for client IP", "ip", forwardedFor)
 		comps := strings.Split(forwardedFor, ",")
 		if len(comps) > 1 {
+			// r.log.V(4).Info("using first IP from X-Forwarded-For header", "ip", comps[0])
 			return comps[0]
 		}
+		// r.log.V(4).Info("using IP from X-Forwarded-For header", "ip", forwardedFor)
 		return forwardedFor
 	}
 	h, _, err := net.SplitHostPort(req.RemoteAddr)
 	if err != nil {
 		return ""
 	}
+	// r.log.V(4).Info("using remote address for client IP", "ip", h, "remote", req.RemoteAddr)
+	return h
+}
+
+func (r *Registry) getRemoteAddr(req *http.Request) string {
+	h, _, err := net.SplitHostPort(req.RemoteAddr)
+	if err != nil {
+		return ""
+	}
+	// r.log.V(4).Info("using remote address for client IP", "ip", h, "remote", req.RemoteAddr)
 	return h
 }

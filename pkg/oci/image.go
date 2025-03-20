@@ -69,14 +69,14 @@ var splitRe = regexp.MustCompile(`[:@]`)
 
 func ParseImage(s string) (Image, error) {
 	if strings.Contains(s, "://") {
-		return Image{}, errors.New("invalid reference")
+		return Image{}, fmt.Errorf("invalid reference: %v", s)
 	}
 	u, err := url.Parse("dummy://" + s)
 	if err != nil {
 		return Image{}, err
 	}
 	if u.Scheme != "dummy" {
-		return Image{}, errors.New("invalid reference")
+		return Image{}, fmt.Errorf("invalid reference: %v", u.Scheme)
 	}
 	if u.Host == "" {
 		return Image{}, errors.New("hostname required")
